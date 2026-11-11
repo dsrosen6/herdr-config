@@ -203,5 +203,9 @@
   "traffic_lights": [
     12,
     16
-  ]
+  ],
+  "theme": {
+    "light": "paper",
+    "dark": "tokyonight-moon"
+  }
 }

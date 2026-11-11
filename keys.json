@@ -84,7 +84,17 @@
     "alt-shift-k": "space.prev",
     "alt-r": "tab.rename",
     "alt-a": "mod.open:claude-new",
-    "alt-shift-a": "mod.open:claude-worktree"
+    "alt-shift-a": "mod.open:claude-worktree",
+    "alt-e": {
+      "command": "tab.new",
+      "args": {
+        "name": "Neovim",
+        "argv": [
+          "nvim",
+          "."
+        ]
+      }
+    }
   },
   "terminal": {
     "cmd-f": "terminal.search",
