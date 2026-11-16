@@ -1,20 +1,54 @@
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-// Writes this session's rate-limit windows to ~/.cache/claude-usage/<id>.json,
-// read by the Herdr app's `usage` mod: { updatedAt, limits: { <kind>: { percentUsed, resetsAt } } }.
-// <id> is the herdr-core terminal (HC_TERMINAL_ID), else this session's id.
+// One JSON file per Herdr terminal, read by the Herdr app's `usage` mod:
+// ~/.cache/claude-usage/<HC_TERMINAL_ID>.json. Every rate-limit window Claude
+// Code reports is kept by its kind (five_hour, seven_day, and any other).
+// Outside Herdr it does nothing.
+
+type Win = { percentUsed: number; resetsAt?: string }
+type Snapshot = { terminal: string; limits: Record<string, Win>; updatedAt: number }
+
+let file: string | null | undefined
+let snap: Snapshot | null = null
+
+async function locate($: EngineInterface): Promise<string | null> {
+  if (file !== undefined) return file
+  try {
+    const r = await $.process.run(['sh', '-c', 'printf "%s\\n%s" "$HOME" "$HC_TERMINAL_ID"'], { timeoutMs: 5000 })
+    const [home, terminal] = r.stdout.split('\n')
+    if (!home || !terminal) return (file = null)
+    const dir = `${home}/.cache/claude-usage`
+    await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5000 })
+    snap = { terminal, limits: {}, updatedAt: 0 }
+    file = `${dir}/${terminal}.json`
+  } catch {
+    file = null
+  }
+  return file
+}
+
+async function publish($: EngineInterface, limits: SessionRateLimit[]) {
+  const path = await locate($)
+  if (!path || !snap || limits.length === 0) return
+  const next = { ...snap.limits }
+  for (const l of limits) next[l.kind] = { percentUsed: l.percentUsed, resetsAt: l.resetsAt }
+  snap = { ...snap, limits: next, updatedAt: await $.clock.now() }
+  try {
+    await $.fs.write(path, JSON.stringify(snap))
+  } catch {}
+}
+
 export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      await publish($, (await $.session.usage()).rateLimits)
+    } catch {}
+    return result
+  })
+
   on('session.measure', async ($, e, next) => {
-    if (e.rateLimits.length > 0 && e.changed.includes('rateLimits')) {
-      const home = await $.env.get('HOME')
-      const id = (await $.env.get('HC_TERMINAL_ID')) ?? (await $.session.id())
-      if (home) {
-        const limits: Record<string, { percentUsed: number; resetsAt?: string }> = {}
-        for (const w of e.rateLimits) limits[w.kind] = { percentUsed: w.percentUsed, resetsAt: w.resetsAt }
-        const file = `${home}/.cache/claude-usage/${id.replace(/[^\w.-]/g, '_')}.json`
-        await $.fs.write(file, JSON.stringify({ updatedAt: Date.now(), limits }))
-      }
-    }
+    await publish($, e.rateLimits)
     return next(e)
-  }).catch(($, e, next) => next(e))
+  })
 }
