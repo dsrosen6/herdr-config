@@ -1,0 +1,1 @@
+{ "name": "herdr-usage-bridge", "version": "0.1.0", "description": "Writes Claude rate-limit usage to ~/.cache/claude-usage for the Herdr app's usage panel" }

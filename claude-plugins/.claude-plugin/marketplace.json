@@ -1,0 +1,5 @@
+{
+  "name": "herdr-config",
+  "owner": { "name": "Danny Rosenthal" },
+  "plugins": [{ "name": "herdr-usage-bridge", "source": "./herdr-usage-bridge" }]
+}
