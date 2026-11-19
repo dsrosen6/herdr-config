@@ -14,8 +14,8 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // Each row: its label and which reported kinds it reads.
 const ROWS = [
-  { label: "5H", match: (k) => k === "five_hour", missing: "No 5-hour reading yet" },
-  { label: "7D", match: (k) => k === "seven_day", missing: "No 7-day reading yet" },
+  { label: "5-hour", match: (k) => k === "five_hour", missing: "No 5-hour reading yet" },
+  { label: "Weekly", match: (k) => k === "seven_day", missing: "No 7-day reading yet" },
 ];
 
 function find(node, id) {
@@ -45,24 +45,26 @@ const durationOf = (kind) => (/five_hour/.test(kind) ? FIVE_HOURS : /seven_day/.
 
 function meter(row, found, now) {
   const { label } = row;
-  if (!found) return { label, pct: null, short: "", note: row.missing };
+  if (!found) return { label, pct: null, note: row.missing };
   const { kind, w } = found;
   const reset = w.resetsAt ? Date.parse(w.resetsAt) : NaN;
-  if (!Number.isNaN(reset) && reset <= now) return { label, pct: 0, short: "", note: "Reset" };
+  if (!Number.isNaN(reset) && reset <= now) return { label, pct: 0, note: "Reset" };
   const pct = clamp(w.percentUsed);
-  if (Number.isNaN(reset)) return { label, pct, short: "", note: "" };
+  if (Number.isNaN(reset)) return { label, pct, note: "" };
   const at = new Date(reset);
   const duration = durationOf(kind);
-  const soon = reset - now < 86400000;
-  const short = soon ? span(reset - now) : `${DAYS[at.getDay()]} ${clock(at, false)}`;
-  const note = soon
-    ? `Resets ${clock(at, true)} · ${span(reset - now)} left`
-    : `Resets ${DAYS[at.getDay()]} ${clock(at, false)}`;
+  const resets = `resets on ${DAYS[at.getDay()]} ${clock(at, true)}`;
+  const note = `${resets} · ${span(reset - now)} left`;
   const pace = duration ? clamp((1 - (reset - now) / duration) * 100) : null;
-  return { label, pct, short, note, pace };
+  return { label, pct, note, resets, pace };
 }
 
-const meterColor = (t, pct) => (pct < 50 ? t.ansi2 : pct < 75 ? t.ansi3 : t.ansi1);
+// On or behind pace: the theme's quiet color. Ahead by up to 10 points: yellow; further: red.
+function paceColor(t, m) {
+  if (m.pct == null || m.pace == null) return t.muted;
+  const ahead = m.pct - m.pace;
+  return ahead <= 0 ? t.muted : ahead <= 10 ? t.ansi3 : t.ansi1;
+}
 
 export default class Usage extends View {
   init(_props, cx) {
@@ -106,25 +108,25 @@ export default class Usage extends View {
     const pct = m.pct ?? 0;
     return div().relative().flex_1().min_w(0).h(h).rounded(h / 2).bg(t.raised)
       .when(pct > 0, (el) => el.child(div().absolute().left(0).top(0).bottom(0).rounded(h / 2)
-        .w(`${Math.max(pct, 2)}%`).bg(meterColor(t, pct))))
+        .w(`${Math.max(pct, 2)}%`).bg(paceColor(t, m))))
       .when(m.pace != null, (el) => el.child(div().absolute().top(-2).h(h + 4).w(2).rounded(1)
         .left(`${m.pace}%`).bg(t.foreground)));
   }
 
   row(m, t) {
-    return h_flex().id(`meter-${m.label}`).h(18).gap(8).items_center().when(Boolean(m.note), (el) => el.tooltip(m.note))
-      .child(div().w(24).flex_none().text_size(11).font_semibold().text_color(t.muted).child(m.label))
-      .child(this.bar(m, t, 5))
-      .child(div().w(32).flex_none().flex().justify_end().text_size(12).font_semibold()
-        .text_color(m.pct == null ? t.dim : meterColor(t, m.pct))
-        .child(m.pct == null ? "—" : `${Math.round(m.pct)}%`))
-      .child(div().w(54).flex_none().flex().justify_end().text_size(11).text_color(t.dim).truncate().child(m.short));
+    return v_flex().id(`meter-${m.label}`).gap(4).when(Boolean(m.note), (el) => el.tooltip(m.note))
+      .child(h_flex().justify_between().items_center()
+        .child(div().text_size(12).text_color(t.muted).child(m.label))
+        .child(div().text_size(12).text_color(m.pct == null ? t.dim : t.muted)
+          .child(m.pct == null ? "—" : `${Math.round(m.pct)}%`)))
+      .child(h_flex().child(this.bar(m, t, 6)))
+      .child(div().text_size(11).text_color(t.dim).truncate().child(m.resets ?? m.note));
   }
 
   compact(m, t) {
     return v_flex().id(`meter-${m.label}`).items_center().gap(3).when(Boolean(m.note), (el) => el.tooltip(m.note))
       .child(div().text_size(9.5).font_semibold().text_color(t.dim).child(m.label))
-      .child(div().text_size(11).font_semibold().text_color(m.pct == null ? t.dim : meterColor(t, m.pct))
+      .child(div().text_size(11).font_semibold().text_color(m.pct == null ? t.dim : paceColor(t, m))
         .child(m.pct == null ? "—" : `${Math.round(m.pct)}`))
       .child(h_flex().w(24).child(this.bar({ ...m, pace: null }, t, 3)));
   }
@@ -137,7 +139,7 @@ export default class Usage extends View {
         .children(meters.map((m) => this.compact(m, t)));
     }
     return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
-      .child(h_flex().h(31).pl(16).items_center().text_size(11.5).text_color(t.dim).child("Usage"))
-      .child(v_flex().px(16).pb(10).gap(6).children(meters.map((m) => this.row(m, t))));
+      .child(h_flex().h(41).pt(14).pb(5).px(16).flex_none().items_center().text_size(11.5).font_medium().text_color(t.dim).child("Claude Usage"))
+      .child(v_flex().px(16).pb(16).gap(8).children(meters.map((m) => this.row(m, t))));
   }
 }
