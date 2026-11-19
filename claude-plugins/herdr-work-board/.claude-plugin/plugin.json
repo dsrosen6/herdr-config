@@ -1,0 +1,1 @@
+{ "name": "herdr-work-board", "version": "0.1.1", "description": "Records which issues Claude Code agents are working on, in <repo>/.claude/local/work-status.json, for the Herdr app's work-board panel; adds the work-status command and the init-herdr-work-panel skill" }

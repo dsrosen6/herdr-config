@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Keeps <repo>/.claude/local/work-status.json: which issues are being worked and at what stage.
+
+The Herdr mod `work-board` draws it as cards. Git and pull request state the mod reads itself;
+this file holds only what git cannot say: which agent is on an issue (building, QA sweep), its
+title, whether it is queued for this session, and whether it is waiting on the person.
+
+A repository takes part when it has docs/agents/issue-tracker.md (the mattpocock skills' setup).
+Its .claude/work-board.json says how issues are named (see `config` below); without it, GitHub
+style `#12` is assumed.
+
+Ways in:
+  work-status hook               a Claude Code hook: the event's JSON on stdin
+  work-status set <id> ...       by hand or by an agent (--title, --branch, --worktree,
+                                 --waiting, --clear-waiting, --note, --clear-note,
+                                 --queued, --clear-queued, --agent NAME STATE)
+  work-status drop <id>          forget an issue
+  work-status show               print the file
+The repository is the one the current folder is in (any of its worktrees counts).
+
+An agent belongs to an issue by its name: `<id>-<stage>`, e.g. cv85-build, 12-qa,
+auth-flow-03-fix. The stage word maps through STAGES.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+STAGES = {
+    "build": "Building",
+    "fix": "Fixing",
+    "qa": "QA sweep",
+    "sweep": "QA sweep",
+    "review": "Review",
+    "recheck": "Re-check",
+    "design": "Designing",
+    "grill": "Designing",
+}
+
+# How issues are named, by tracker, when .claude/work-board.json leaves a field out.
+# `ref` finds an issue in commit subjects and pull request titles; `agent` matches the start
+# of an agent's name. Their capture groups, joined by "/", are the issue's key.
+DEFAULTS = {
+    "github": {"prefix": "#", "ref": r"#(\d+)", "agent": r"(?:issue-?|gh-?|#)?(\d+)"},
+    "local": {"prefix": "", "ref": r"\b([a-z0-9][a-z0-9-]*)/(\d{2})\b", "agent": r"([a-z0-9][a-z0-9-]*?)-(\d{2})(?=[-_ ]|$)"},
+}
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def repo_of(cwd):
+    """The main checkout of the repository cwd is in (a worktree counts), or None."""
+    if not cwd:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return re.sub(r"/\.git/?$", "", out.stdout.strip())
+
+
+def config(repo):
+    """The repository's work-board.json over its tracker's defaults; None when it takes no part."""
+    if not os.path.exists(os.path.join(repo, "docs", "agents", "issue-tracker.md")):
+        return None
+    try:
+        with open(os.path.join(repo, ".claude", "work-board.json")) as f:
+            own = json.load(f)
+    except (OSError, ValueError):
+        own = {}
+    tracker = own.get("tracker", "github")
+    prefix = own.get("prefix", DEFAULTS.get(tracker, DEFAULTS["github"])["prefix"])
+    base = DEFAULTS.get(tracker)
+    if base is None:  # Notion, Linear, other: a prefix like CV- or ENG-.
+        p = re.escape(prefix.rstrip("-"))
+        base = {"prefix": prefix, "ref": rf"\b{p}-?(\d+)\b", "agent": rf"{p}-?(\d+)(?=[-_ ]|$)"}
+    return {**base, **own}
+
+
+def key_of(match):
+    return "/".join(g for g in match.groups() if g is not None).lower()
+
+
+class Board:
+    def __init__(self, repo, cfg):
+        self.repo, self.cfg = repo, cfg
+        self.dir = os.path.join(repo, ".claude", "local")
+        self.agent_re = re.compile("^" + cfg["agent"], re.IGNORECASE)
+        self.ref_re = re.compile(cfg["ref"], re.IGNORECASE)
+
+    def agent_of(self, name):
+        """(issue key, stage) for an agent named for an issue, else None."""
+        name = (name or "").strip()
+        m = self.agent_re.match(name)
+        if not m:
+            return None
+        rest = name[m.end():].strip("-_ ").lower()
+        first = re.split(r"[-_ ]", rest)[0] if rest else ""
+        return key_of(m), STAGES.get(first, rest.replace("-", " ").capitalize() or "Working")
+
+    def key(self, text):
+        """The issue key a person or agent typed: CV-85, #12, auth-flow/03, or just 85."""
+        for r in (self.ref_re, self.agent_re):
+            m = r.search(text) if r is self.ref_re else r.match(text)
+            if m:
+                return key_of(m)
+        m = re.search(r"(\d+)", text)
+        if not m:
+            sys.exit(f"{text!r} names no issue")
+        return m.group(1)
+
+
+class Store:
+    """The status file, read and written under a lock: hooks can run at the same moment."""
+
+    def __init__(self, board):
+        self.dir = board.dir
+        self.path = os.path.join(self.dir, "work-status.json")
+
+    def __enter__(self):
+        os.makedirs(self.dir, exist_ok=True)
+        self.lock = open(self.path + ".lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            with open(self.path) as f:
+                self.data = json.load(f)
+        except (OSError, ValueError):
+            self.data = {}
+        # Files from the Coverage Portal board kept issues under "cvs".
+        if "cvs" in self.data:
+            self.data.setdefault("issues", {}).update(self.data.pop("cvs"))
+        self.data.setdefault("issues", {})
+        self.before = json.dumps(self.data, sort_keys=True)
+        return self
+
+    def issue(self, key):
+        return self.data["issues"].setdefault(str(key), {"agents": {}})
+
+    def __exit__(self, kind, *_):
+        try:
+            if kind is None and json.dumps(self.data, sort_keys=True) != self.before:
+                self.data["updated"] = now()
+                fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".work-status-")
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self.data, f, indent=2)
+                    f.write("\n")
+                os.replace(tmp, self.path)
+        finally:
+            fcntl.flock(self.lock, fcntl.LOCK_UN)
+            self.lock.close()
+
+
+def names_in(payload):
+    """Every field a stop or idle event might name its agent in."""
+    return [v for k in ("teammate_name", "agent_name", "name", "agent_type", "subagent_type", "agent_id")
+            if isinstance(v := payload.get(k), str)]
+
+
+def board_for(cwd):
+    repo = repo_of(cwd)
+    cfg = config(repo) if repo else None
+    return Board(repo, cfg) if cfg else None
+
+
+def hook():
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        return
+    board = board_for(payload.get("cwd") or os.getcwd())
+    if not board:
+        return
+    event = payload.get("hook_event_name", "")
+    tool, tin = payload.get("tool_name", ""), payload.get("tool_input") or {}
+    with Store(board) as s:
+        if event == "PreToolUse" and tool == "Agent":
+            who = board.agent_of(tin.get("name"))
+            if not who:
+                return
+            key, stage = who
+            row = s.issue(key)
+            prompt = tin.get("prompt") or ""
+            for field, pattern in (("branch", r"branch `([^`]+)`"), ("worktree", r"worktree\s+`([^`]+)`")):
+                m = re.search(pattern, prompt)
+                if m:
+                    row[field] = m.group(1)
+            row.pop("queued", None)  # An agent on the issue: it has begun.
+            row["agents"][tin["name"]] = {
+                "stage": stage, "state": "running", "since": now(),
+                "about": tin.get("description") or "", "model": tin.get("model") or "",
+            }
+        elif event == "PreToolUse" and tool == "SendMessage":
+            # A message wakes an idle agent: it is working again.
+            who = board.agent_of(tin.get("to"))
+            if not who:
+                return
+            agent = s.issue(who[0])["agents"].get(tin["to"])
+            if agent and agent.get("state") != "running":
+                agent["state"], agent["since"] = "running", now()
+        elif event in ("TeammateIdle", "SubagentStop"):
+            for name in names_in(payload):
+                who = board.agent_of(name)
+                if not who:
+                    continue
+                agent = s.issue(who[0])["agents"].get(name)
+                if agent and agent.get("state") == "running":
+                    agent["state"], agent["since"] = "idle", now()
+        elif event == "UserPromptSubmit":
+            # The person answered: nothing waits on them until an issue is marked again. A
+            # teammate's report arrives as a prompt too, and is not their answer.
+            text = payload.get("prompt") or ""
+            if "<teammate-message" in text or "<task-notification" in text or "<agent-message" in text:
+                return
+            for row in s.data["issues"].values():
+                row.pop("waiting", None)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="work-status")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("hook")
+    sub.add_parser("show")
+    d = sub.add_parser("drop")
+    d.add_argument("id")
+    st = sub.add_parser("set")
+    st.add_argument("id")
+    for flag in ("title", "branch", "worktree", "waiting", "note"):
+        st.add_argument("--" + flag)
+    st.add_argument("--clear-waiting", action="store_true")
+    st.add_argument("--clear-note", action="store_true")
+    st.add_argument("--queued", action="store_true")
+    st.add_argument("--clear-queued", action="store_true")
+    st.add_argument("--agent", nargs=2, metavar=("NAME", "STATE"), help="running or idle")
+    a = p.parse_args()
+
+    if a.cmd == "hook":
+        try:
+            hook()
+        except Exception:  # A status board never gets in a tool call's way.
+            pass
+        return
+    board = board_for(os.getcwd())
+    if not board:
+        sys.exit("Not in a repository with docs/agents/issue-tracker.md")
+    with Store(board) as s:
+        if a.cmd == "show":
+            print(json.dumps(s.data, indent=2))
+            return
+        if a.cmd == "drop":
+            s.data["issues"].pop(board.key(a.id), None)
+            return
+        row = s.issue(board.key(a.id))
+        for flag in ("title", "branch", "worktree", "note"):
+            if getattr(a, flag) is not None:
+                row[flag] = getattr(a, flag)
+        if a.waiting is not None:
+            row["waiting"] = {"question": a.waiting, "since": now()}
+        if a.clear_waiting:
+            row.pop("waiting", None)
+        if a.clear_note:
+            row.pop("note", None)
+        if a.queued:
+            row.setdefault("queued", now())
+        if a.clear_queued:
+            row.pop("queued", None)
+        if a.agent:
+            name, state = a.agent
+            who = board.agent_of(name)
+            old = row["agents"].get(name, {})
+            row["agents"][name] = {**old, "stage": old.get("stage") or (who[1] if who else "Working"), "state": state, "since": now()}
+
+
+if __name__ == "__main__":
+    main()

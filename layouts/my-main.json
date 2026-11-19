@@ -108,13 +108,10 @@
               "window_drag": true
             },
             {
-              "id": "cv-button",
+              "id": "work-button",
               "type": "block",
               "content": {
-                "mod": "cv-button",
-                "props": {
-                  "folder": "/Users/danny/projects/coverage-portal"
-                }
+                "mod": "work-button"
               },
               "size": {
                 "px": 0
@@ -182,13 +179,10 @@
                       }
                     },
                     {
-                      "id": "cv-board",
+                      "id": "work-board",
                       "type": "block",
                       "content": {
-                        "mod": "cv-board",
-                        "props": {
-                          "folder": "/Users/danny/projects/coverage-portal"
-                        }
+                        "mod": "work-board"
                       }
                     }
                   ],

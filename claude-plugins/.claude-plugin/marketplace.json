@@ -1,5 +1,16 @@
 {
   "name": "herdr-config",
-  "owner": { "name": "Danny Rosenthal" },
-  "plugins": [{ "name": "herdr-usage-bridge", "source": "./herdr-usage-bridge" }]
+  "owner": {
+    "name": "Danny Rosenthal"
+  },
+  "plugins": [
+    {
+      "name": "herdr-usage-bridge",
+      "source": "./herdr-usage-bridge"
+    },
+    {
+      "name": "herdr-work-board",
+      "source": "./herdr-work-board"
+    }
+  ]
 }
