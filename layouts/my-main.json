@@ -60,6 +60,16 @@
           }
         },
         {
+          "id": "perf",
+          "type": "block",
+          "content": {
+            "mod": "perf"
+          },
+          "size": {
+            "px": 76
+          }
+        },
+        {
           "id": "sidebar-footer",
           "type": "block",
           "content": {
