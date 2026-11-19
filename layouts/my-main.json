@@ -53,7 +53,7 @@
           "id": "usage",
           "type": "block",
           "size": {
-            "px": 154
+            "px": 170
           },
           "content": {
             "mod": "usage"
