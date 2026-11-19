@@ -1,5 +1,6 @@
 // Performance: this Mac's CPU and RAM on one line, colored at warning and
-// error levels. CPU comes from a one-second iostat sample, RAM from vm_stat
+// error levels. CPU is the average of back-to-back 5-second iostat samples
+// over the last 30 seconds, RAM is read from vm_stat
 // (used = app memory + wired + compressed, as Activity Monitor counts it).
 
 import { View, div } from "gpui-kit";
@@ -7,6 +8,8 @@ import { v_flex, h_flex } from "gpui-base";
 import { theme, layout, exec } from "herdr";
 
 const POLL_MS = 5000;
+const CPU_SAMPLE_S = 5;
+const CPU_WINDOW_MS = 30000;
 const CPU_LEVELS = { warn: 70, error: 90 };
 const RAM_LEVELS = { warn: 80, error: 90 };
 const PRESSURE_LEVELS = { warn: 50, error: 75 };
@@ -32,8 +35,8 @@ function level(t, pct, levels) {
 }
 
 async function sampleCpu() {
-  // Second row of numbers is the last second; the first is since boot.
-  const r = await exec("iostat", ["-n0", "-c2", "-w1"], { timeout: 5000 });
+  // Second row of numbers covers the last CPU_SAMPLE_S seconds; the first is since boot.
+  const r = await exec("iostat", ["-n0", "-c2", `-w${CPU_SAMPLE_S}`], { timeout: CPU_SAMPLE_S * 1000 + 5000 });
   const rows = r.stdout.trim().split("\n").filter((l) => /^\s*\d/.test(l));
   const [us, sy, , l1, l5, l15] = rows.at(-1).trim().split(/\s+/).map(Number);
   return { pct: us + sy, user: us, sys: sy, load: [l1, l5, l15] };
@@ -55,19 +58,34 @@ async function sampleRam() {
 export default class Perf extends View {
   init(_props, cx) {
     this.cpu = null;
+    this.cpuSamples = [];
     this.ram = null;
     this.busy = false;
-    this.refresh(cx);
-    cx.timer.every(POLL_MS, (cx) => this.refresh(cx));
+    this.refreshRam(cx);
+    cx.timer.every(POLL_MS, (cx) => this.refreshRam(cx));
+    // iostat itself waits CPU_SAMPLE_S, so back-to-back samples cover all the time.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        try {
+          const s = await sampleCpu();
+          const now = Date.now();
+          this.cpuSamples = [...this.cpuSamples, { at: now, pct: s.pct }].filter((x) => now - x.at < CPU_WINDOW_MS);
+          const avg = this.cpuSamples.reduce((sum, x) => sum + x.pct, 0) / this.cpuSamples.length;
+          this.cpu = { ...s, now: s.pct, pct: avg };
+        } catch {
+          this.cpu = null;
+          await exec("sleep", [String(CPU_SAMPLE_S)]).catch(() => {});
+        }
+        cx.notify();
+      }
+    });
   }
 
-  refresh(cx) {
+  refreshRam(cx) {
     if (this.busy) return;
     this.busy = true;
     cx.spawn(async (cx) => {
-      const [cpu, ram] = await Promise.allSettled([sampleCpu(), sampleRam()]);
-      this.cpu = cpu.status === "fulfilled" ? cpu.value : null;
-      this.ram = ram.status === "fulfilled" ? ram.value : null;
+      try { this.ram = await sampleRam(); } catch { this.ram = null; }
       this.busy = false;
       cx.notify();
     });
@@ -88,7 +106,7 @@ export default class Perf extends View {
     const pressureColor = level(t, ram?.pressure, PRESSURE_LEVELS);
     const cpuText = cpu ? `${Math.round(cpu.pct)}%` : "—";
     const ramText = ram ? `${(ram.used / GB).toFixed(1)}GB / ${Math.round(ram.total / GB)}GB / ` : "—";
-    const cpuTip = cpu && `user ${cpu.user}% · system ${cpu.sys}% · load ${cpu.load.join(" / ")}`;
+    const cpuTip = cpu && `30s average · last 5s ${Math.round(cpu.now)}% (user ${cpu.user}% · system ${cpu.sys}%) · load ${cpu.load.join(" / ")}`;
     const ramTip = ram && `${Math.round(ram.pct)}% used · ${ram.pressure}% memory pressure · ${(ram.compressed / GB).toFixed(1)} GB compressed`;
     const pressureText = ram ? `${ram.pressure}%` : "—";
 
