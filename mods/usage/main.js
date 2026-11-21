@@ -2,10 +2,12 @@
 // Claude Code session. Readings come from the herdr-usage-bridge Claude Code
 // mod: ~/.cache/claude-usage/<terminal>.json, each window kept by its kind.
 // The bars carry a pace tick at how much of the window's time has passed.
+// A third bar shows the focused agent's context window, from that terminal's
+// own reading; empty (same height) when no Claude agent has the focus.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, layout, home, watchFolder } from "herdr";
+import { theme, layout, home, watchFolder, focused, agents } from "herdr";
 import * as fs from "fs/promises";
 
 const FIVE_HOURS = 5 * 3600000;
@@ -59,8 +61,21 @@ function meter(row, found, now) {
   return { label, pct, note, resets, pace };
 }
 
+const tokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
+
+// The focused agent's context fill: its terminal's reading, or an empty bar.
+function contextMeter(reading, agent) {
+  const label = "Context";
+  if (!agent) return { label, pct: null, note: "No agent focused" };
+  const c = reading?.context;
+  if (!c?.window) return { label, pct: null, note: "No reading for this agent" };
+  if (c.percent == null) return { label, pct: 0, note: `0 / ${tokens(c.window)} tokens`, context: true };
+  return { label, pct: clamp(c.percent), note: `${tokens(c.tokens ?? 0)} / ${tokens(c.window)} tokens`, context: true };
+}
+
 // On or behind pace: the theme's quiet color. Ahead by up to 10 points: yellow; further: red.
 function paceColor(t, m) {
+  if (m.context) return m.pct < 50 ? t.muted : m.pct < 80 ? t.ansi3 : t.ansi1;
   if (m.pct == null || m.pace == null) return t.muted;
   const ahead = m.pct - m.pace;
   return ahead <= 0 ? t.muted : ahead <= 10 ? t.ansi3 : t.ansi1;
@@ -90,7 +105,7 @@ export default class Usage extends View {
     try { names = await fs.readdir(this.dir); } catch {}
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
-      try { next.push(JSON.parse(await fs.readFile(`${this.dir}/${name}`, "utf8"))); } catch {}
+      try { next.push({ file: name.slice(0, -5), ...JSON.parse(await fs.readFile(`${this.dir}/${name}`, "utf8")) }); } catch {}
     }
     this.readings = next.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     this.now = Date.now();
@@ -102,6 +117,15 @@ export default class Usage extends View {
       for (const [kind, w] of Object.entries(r.limits ?? {})) if (row.match(kind)) return { kind, w };
     }
     return null;
+  }
+
+  // The agent with the keyboard (a pane's or an agent block's), and its reading.
+  focusedContext() {
+    const f = focused();
+    const address = f?.terminal ?? f?.agent;
+    const agent = address ? agents().find((a) => a.address === address) : null;
+    const reading = agent ? this.readings.find((r) => (r.terminal ?? r.file) === agent.address) : null;
+    return contextMeter(reading, agent);
   }
 
   bar(m, t, h) {
@@ -133,7 +157,7 @@ export default class Usage extends View {
 
   render() {
     const t = theme();
-    const meters = ROWS.map((row) => meter(row, this.pick(row), this.now));
+    const meters = [...ROWS.map((row) => meter(row, this.pick(row), this.now)), this.focusedContext()];
     if (narrow()) {
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).items_center().justify_center().gap(10)
         .children(meters.map((m) => this.compact(m, t)));
