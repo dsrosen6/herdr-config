@@ -53,20 +53,14 @@
           "id": "usage",
           "type": "block",
           "content": {
-            "mod": "usage"
+            "mod": "usage",
+            "props": {
+              "block": "usage",
+              "height": 118
+            }
           },
           "size": {
-            "px": 222
-          }
-        },
-        {
-          "id": "perf",
-          "type": "block",
-          "content": {
-            "mod": "perf"
-          },
-          "size": {
-            "px": 76
+            "px": 118
           }
         },
         {
@@ -115,6 +109,16 @@
               },
               "size": {
                 "px": 0
+              }
+            },
+            {
+              "id": "usage-button",
+              "type": "block",
+              "content": {
+                "mod": "usage-button"
+              },
+              "size": {
+                "px": 80
               }
             }
           ],
@@ -184,6 +188,16 @@
                       "content": {
                         "mod": "work-board"
                       }
+                    },
+                    {
+                      "id": "usage-panel",
+                      "type": "block",
+                      "content": {
+                        "mod": "usage",
+                        "props": {
+                          "panel": true
+                        }
+                      }
                     }
                   ],
                   "active": "files"
@@ -201,14 +215,34 @@
           "gap": 8
         },
         {
-          "id": "status",
-          "type": "block",
-          "content": {
-            "mod": "workspace-status"
-          },
+          "id": "status-row",
+          "type": "row",
           "size": {
             "px": 28
-          }
+          },
+          "resizable": false,
+          "children": [
+            {
+              "id": "status",
+              "type": "block",
+              "content": {
+                "mod": "workspace-status"
+              }
+            },
+            {
+              "id": "perf-bar",
+              "type": "block",
+              "content": {
+                "mod": "perf",
+                "props": {
+                  "bar": true
+                }
+              },
+              "size": {
+                "px": 200
+              }
+            }
+          ]
         },
         {
           "id": "panel-keys",

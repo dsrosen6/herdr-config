@@ -7,7 +7,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, layout, home, watchFolder, focused, agents } from "herdr";
+import { theme, layout, home, watchFolder, focused, agents, props, run } from "herdr";
 import * as fs from "fs/promises";
 
 const FIVE_HOURS = 5 * 3600000;
@@ -29,6 +29,33 @@ function find(node, id) {
   return null;
 }
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
+
+// Folding (props.block): a click on the header folds the block to its title line, and back.
+// The layout gives the block's id and open height (props.block, props.height); the
+// fold is kept per screen in localStorage and applied with layout.resize.
+const FOLDED_PX = 36;
+function foldInit(view) { view.folded = localStorage.getItem("folded") === "1"; }
+function foldSync(view) {
+  const p = props(), id = p?.block;
+  if (!id) return;
+  const want = view.folded ? FOLDED_PX : (p.height ?? null);
+  const have = find(layout(), id)?.size?.px;
+  if (want == null || have === want) { view.askedPx = null; return; }
+  if (view.askedPx !== want) { view.askedPx = want; run("layout.resize", { id, px: want }); }
+}
+function foldToggle(view, cx) {
+  view.folded = !view.folded;
+  localStorage.setItem("folded", view.folded ? "1" : "0");
+  cx.notify();
+}
+// The header: chevron, title, and (folded) the summary on the right.
+function foldHeader(view, title, t, open) {
+  return h_flex().id("fold-header").flex_none().px(16).gap(6).items_center().text_size(11.5).font_medium().text_color(t.dim)
+    .when(open, (el) => el.h(34).pt(10).pb(4)).when(!open, (el) => el.h(FOLDED_PX))
+    .cursor_pointer().hover((s) => s.text_color(t.muted)).on_click((_e, cx) => foldToggle(view, cx))
+    .child(div().w(10).flex_none().child(open ? "▾" : "▸"))
+    .child(div().flex_1().min_w(0).truncate().child(title));
+}
 
 const clamp = (n) => Math.min(100, Math.max(0, n));
 function clock(d, minutes) {
@@ -83,6 +110,7 @@ function paceColor(t, m) {
 
 export default class Usage extends View {
   init(_props, cx) {
+    foldInit(this);
     this.dir = `${home()}/.cache/claude-usage`;
     this.readings = [];
     this.now = Date.now();
@@ -155,12 +183,35 @@ export default class Usage extends View {
       .child(h_flex().w(24).child(this.bar({ ...m, pace: null }, t, 3)));
   }
 
+  // One line per meter: label, bar, percent; the reset time or token count in its tooltip.
+  line(m, t) {
+    return h_flex().id(`line-${m.label}`).h(20).gap(8).items_center().when(Boolean(m.note), (el) => el.tooltip(m.note))
+      .child(div().w(52).flex_none().text_size(12).text_color(t.muted).child(m.label))
+      .child(this.bar(m, t, 5))
+      .child(div().w(34).flex_none().flex().justify_end().text_size(12).text_color(m.pct == null ? t.dim : m.context ? paceColor(t, m) : t.muted)
+        .child(m.pct == null ? "—" : `${Math.round(m.pct)}%`));
+  }
+
   render() {
     const t = theme();
     const meters = [...ROWS.map((row) => meter(row, this.pick(row), this.now)), this.focusedContext()];
     if (narrow()) {
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).items_center().justify_center().gap(10)
         .children(meters.map((m) => this.compact(m, t)));
+    }
+    // The sidebar: compact lines under a header that folds.
+    if (props()?.block) {
+      foldSync(this);
+      const open = !this.folded;
+      return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
+        .child(foldHeader(this, "Claude Usage", t, open))
+        .when(open, (el) => el.child(v_flex().px(16).pb(12).gap(6).children(meters.map((m) => this.line(m, t)))));
+    }
+    // The right-hand panel: the full rows, details written out, as a card like the other panels.
+    if (props()?.panel) {
+      return v_flex().id("usage-panel").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_size(13)
+        .child(h_flex().h(38).flex_none().px(12).items_center().border_b(1).border_color(t.border).font_semibold().child("Claude Usage"))
+        .child(v_flex().p(16).gap(14).children(meters.map((m) => this.row(m, t))));
     }
     return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).text_size(13)
       .child(h_flex().h(41).pt(14).pb(5).px(16).flex_none().items_center().text_size(11.5).font_medium().text_color(t.dim).child("Claude Usage"))

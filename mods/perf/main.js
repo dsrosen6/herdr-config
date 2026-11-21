@@ -2,10 +2,12 @@
 // error levels. CPU is the average of back-to-back 5-second iostat samples
 // over the last 30 seconds, RAM is read from vm_stat
 // (used = app memory + wired + compressed, as Activity Monitor counts it).
+// props.bar: one row for the bottom status bar (CPU and RAM, each a tiny bar and
+// its percent, the details in the tooltip).
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, layout, exec } from "herdr";
+import { theme, layout, exec, props } from "herdr";
 
 const POLL_MS = 5000;
 const CPU_SAMPLE_S = 5;
@@ -109,6 +111,17 @@ export default class Perf extends View {
     const cpuTip = cpu && `30s average · last 5s ${Math.round(cpu.now)}% (user ${cpu.user}% · system ${cpu.sys}%) · load ${cpu.load.join(" / ")}`;
     const ramTip = ram && `${Math.round(ram.pct)}% used · ${ram.pressure}% memory pressure · ${(ram.compressed / GB).toFixed(1)} GB compressed`;
     const pressureText = ram ? `${ram.pressure}%` : "—";
+
+    if (props()?.bar) {
+      const chip = (id, label, pct, color, tip) => h_flex().id(id).gap(5).items_center().when(Boolean(tip), (el) => el.tooltip(tip))
+        .child(div().text_color(t.dim).child(label))
+        .child(div().relative().w(28).h(4).rounded(2).bg(t.raised)
+          .when((pct ?? 0) > 0, (el) => el.child(div().absolute().left(0).top(0).bottom(0).rounded(2).w(`${Math.max(Math.min(pct, 100), 2)}%`).bg(color))))
+        .child(div().text_color(pct == null ? t.dim : color).child(pct == null ? "—" : `${Math.round(pct)}%`));
+      return h_flex().size_full().pr(14).gap(14).items_center().justify_end().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8)
+        .child(chip("cpu", "CPU", cpu?.pct, cpuColor, cpuTip))
+        .child(chip("ram", "RAM", ram?.pct, ramColor, ramTip));
+    }
 
     if (narrow()) {
       const cell = (id, label, value, color, tip) => v_flex().id(id).items_center().gap(3).when(Boolean(tip), (el) => el.tooltip(tip))
