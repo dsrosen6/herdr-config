@@ -13,6 +13,7 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, run, theme, layout, exec, readTextFile } from "herdr";
 
 const WIDTH = 78;
+const RECHECK_MS = 30000;
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -24,9 +25,31 @@ function find(node, id) {
 }
 
 export default class WorkButton extends View {
-  init() {
-    // Per folder, asked once: whether it is in a repository set up for the board.
+  init(_props, cx) {
+    // Per folder: whether it is in a repository set up for the board. A yes is kept; a no is
+    // asked again every RECHECK_MS in the background, and only a flip to yes redraws, so a
+    // repository set up while Herdr runs gets its button without a reload or idle redraws.
     this.setUp = {};
+    cx.timer.every(RECHECK_MS, (cx) => {
+      const nos = Object.keys(this.setUp).filter((cwd) => this.setUp[cwd] === false);
+      if (nos.length === 0) return;
+      cx.spawn(async (cx) => {
+        let flipped = false;
+        for (const cwd of nos) {
+          if (await this.check(cwd)) { this.setUp[cwd] = true; flipped = true; }
+        }
+        if (flipped) cx.notify();
+      });
+    });
+  }
+
+  // Whether cwd is in a repository with docs/agents/issue-tracker.md (readTextFile gives null
+  // for a missing file).
+  async check(cwd) {
+    const r = await exec("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd }).catch(() => null);
+    const root = r?.code === 0 ? r.stdout.trim().replace(/\/\.git\/?$/, "") : null;
+    if (!root) return false;
+    return readTextFile(`${root}/docs/agents/issue-tracker.md`).then((text) => text != null).catch(() => false);
   }
 
   // Unknown folders count as no until git and the file system have answered; the answer redraws.
@@ -35,9 +58,7 @@ export default class WorkButton extends View {
     if (cwd in this.setUp) return this.setUp[cwd] === true;
     this.setUp[cwd] = null;
     cx.spawn(async (cx) => {
-      const r = await exec("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd }).catch(() => null);
-      const root = r?.code === 0 ? r.stdout.trim().replace(/\/\.git\/?$/, "") : null;
-      this.setUp[cwd] = root ? await readTextFile(`${root}/docs/agents/issue-tracker.md`).then(() => true).catch(() => false) : false;
+      this.setUp[cwd] = await this.check(cwd);
       cx.notify();
     });
     return false;
