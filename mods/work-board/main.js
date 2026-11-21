@@ -138,7 +138,9 @@ export default class WorkBoard extends View {
   // Ready issues and titles from trackers that cost nothing to read.
   async readTracker(root, github) {
     const { tracker, ready } = this.cfg;
-    if (tracker === "github" && github) {
+    // GitHub is read on the slow beat only: a fast beat keeps the last list.
+    if (tracker === "github" && !github) return;
+    if (tracker === "github") {
       const r = await exec("gh", ["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,labels,createdAt"], { cwd: root }).catch(() => null);
       if (r?.code !== 0) return;
       const out = {};
@@ -170,6 +172,7 @@ export default class WorkBoard extends View {
     if (this.loading) return;
     const cwd = this.folder();
     if (!cwd) return;
+    this.asked = cwd;
     this.loading = true;
     cx.spawn(async (cx) => {
       try {
@@ -177,11 +180,13 @@ export default class WorkBoard extends View {
         const common = await exec("git", [...READ, "rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
         if (common.code !== 0) { this.error = "Not a git repository"; this.root = null; return; }
         const root = common.stdout.trim().replace(/\/\.git\/?$/, "");
-        if (root !== this.root) { this.status = { issues: {} }; this.branches = []; this.open = []; this.merged = []; this.tracker = {}; github = true; }
+        if (root !== this.root) { this.status = { issues: {} }; this.branches = []; this.open = []; this.merged = []; this.tracker = {}; this.setUp = null; this.loaded = null; this.error = null; github = true; }
         this.root = root;
-        const own = await readTextFile(`${root}/.claude/work-board.json`).then((t) => JSON.parse(t)).catch(() => ({}));
+        const own = await readTextFile(`${root}/.claude/work-board.json`).then((t) => (t ? JSON.parse(t) : {})).catch(() => ({}));
         this.cfg = configOf(own);
-        this.setUp = await readTextFile(`${root}/docs/agents/issue-tracker.md`).then(() => true).catch(() => false);
+        this.setUp = await readTextFile(`${root}/docs/agents/issue-tracker.md`).then((text) => text != null).catch(() => false);
+        // Known to be set up: draw the loading state now, while git and gh are still running.
+        cx.notify();
         const git = (args) => exec("git", [...READ, ...args], { cwd: root });
         this.watch(`${root}/.claude/local`, cx);
         await this.readStatus(cx);
@@ -230,7 +235,7 @@ export default class WorkBoard extends View {
           this.github = open?.code === 0 ? null : "gh could not list pull requests";
         }
         await this.readTracker(root, github);
-        this.error = null; this.checked = Date.now();
+        this.error = null; this.checked = Date.now(); this.loaded = root;
       } catch (e) { this.error = String(e); }
       finally { this.loading = false; cx.notify(); }
     });
@@ -350,12 +355,17 @@ export default class WorkBoard extends View {
       .child(div().flex_none().text_size(11).text_color(t.dim).child(c.detail));
   }
 
-  render() {
+  render(cx) {
+    // A different folder (another pane or space) loads at once, not on the next timer beat.
+    const cwd = this.folder();
+    if (cwd && cwd !== this.asked && !this.loading) this.refresh(cx, false);
     const t = theme(), now = Date.now(), cards = this.cards(now);
     const live = cards.filter((c) => c.rank < 5);
     const merged = cards.filter((c) => c.rank === 5).sort((a, b) => Date.parse(b.merged.mergedAt) - Date.parse(a.merged.mergedAt)).slice(0, MERGED_SHOWN);
     const name = this.root ? this.root.split("/").pop() : "";
-    const empty = this.error || (!this.root ? (this.loading ? "Loading…" : "No folder")
+    // First load of this repository (not the background refreshes): a spinner, not "Nothing in flight".
+    const first = !this.error && this.setUp !== false && this.loaded !== this.root && (this.loading || !this.root);
+    const empty = this.error || (!this.root && !this.loading ? "No folder"
       : this.setUp === false ? "This repository has no docs/agents/issue-tracker.md: run init-herdr-work-panel in Claude Code."
       : "Nothing in flight.");
     return v_flex().id("work-board").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
@@ -363,10 +373,13 @@ export default class WorkBoard extends View {
         .child(div().font_semibold().text_size(13).child("Work in flight"))
         .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(name))
         .child(div().id("work-refresh").flex_none().px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.muted).cursor_pointer()
-          .hover((s) => s.bg(t.raised)).on_click((_e, cx) => this.refresh(cx, true)).child(this.loading ? "…" : "Refresh")))
+          .hover((s) => s.bg(t.raised)).on_click((_e, cx) => this.refresh(cx, true)).when(this.loading, (el) => el.frames(SPIN, 90)).when(!this.loading, (el) => el.child("Refresh"))))
       .child(v_flex().id("work-list").flex_1().min_h(0).overflow_y_scroll().p(8).gap(8)
         .children(live.map((c) => this.card(c, t)))
-        .when(!live.length, (el) => el.child(div().p(8).text_color(t.dim).child(empty)))
+        .when(first, (el) => el.child(h_flex().p(8).gap(6).items_center().text_color(t.dim)
+          .child(div().w(12).flex_none().text_color(t.working).frames(SPIN, 90))
+          .child(div().child(this.root ? "Loading work…" : "Finding repository…"))))
+        .when(!first && !live.length, (el) => el.child(div().p(8).text_color(t.dim).child(empty)))
         .when(merged.length > 0, (el) => el.child(div().flex_none().pt(4).px(2).text_size(11).text_color(t.dim).child("Merged")).child(v_flex().flex_none().children(merged.map((c) => this.mergedRow(c, t)))))
         .when(Boolean(this.github), (el) => el.child(div().flex_none().px(2).text_size(11).text_color(t.dim).child(this.github))));
   }
